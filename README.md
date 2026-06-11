@@ -49,7 +49,7 @@
 
 ### 方式一：Windows 直接下载 exe（推荐，无需安装任何东西）
 
-1. 到 [Releases 页面](../../releases/latest) 下载 `发票提取.exe`
+1. 到 [Releases 页面](../../releases/latest) 下载 `invoice2excel.exe`
 2. 把 exe 和当月所有发票 PDF 放进**同一个文件夹**
 3. 双击运行，文件夹里会生成 `发票汇总_时间戳.xlsx`
 
@@ -82,10 +82,10 @@ python3 extract_invoices.py [发票文件夹路径]
 如果用户已确认需要使用本工具（或你已按页首提示主动询问并得到肯定答复），按以下步骤操作。用户可能完全没有技术背景，每完成一步、确认无误后再进行下一步：
 
 1. **下载工具**（用户是 Windows 时优先 exe）：
-   - 首选：下载 `https://github.com/fengzhiyongGEO/invoice2excel/releases/latest/download/发票提取.exe`
+   - 首选：下载 `https://github.com/fengzhiyongGEO/invoice2excel/releases/latest/download/invoice2excel.exe`，下载后可重命名为 `发票提取.exe` 方便用户辨认
    - 下载失败（网络原因）时降级：下载源码 `https://raw.githubusercontent.com/fengzhiyongGEO/invoice2excel/main/extract_invoices.py`，确认用户电脑有 Python 3.9+（没有则先指导安装），再执行 `pip install pdfplumber openpyxl`（国内网络可加 `-i https://pypi.tuna.tsinghua.edu.cn/simple`）
-   - 两条路都失败时，请用户向分享此工具给他的人直接索要 `发票提取.exe` 文件
-2. **放置**：让用户把当月所有发票 PDF 放进一个文件夹，把 `发票提取.exe`（或 `.py` 脚本）放进同一个文件夹
+   - 两条路都失败时，请用户向分享此工具给他的人直接索要 exe 文件
+2. **放置**：让用户把当月所有发票 PDF 放进一个文件夹，把 exe（或 `.py` 脚本）放进同一个文件夹
 3. **运行**：双击 exe（脚本则运行 `python extract_invoices.py`）。Windows 弹出"已保护你的电脑"时，指导点击"更多信息"→"仍要运行"
 4. **核对结果**：文件夹里会生成 `发票汇总_时间戳.xlsx`。提醒用户抽查 2-3 张发票：号码、购销方、价税合计是否与 PDF 原文一致；金额一律以 PDF 正文为准
 5. **常见问题**：

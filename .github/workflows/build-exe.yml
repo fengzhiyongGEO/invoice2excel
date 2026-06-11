@@ -33,8 +33,13 @@ jobs:
           path: dist/发票提取.exe
 
       # 打 tag（如 v1.0.0）时发布 Release，提供免登录的 exe 直链
+      # Release 资产名不支持中文（会被改成 default.exe），需用 ASCII 文件名
+      - name: Rename EXE for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Copy-Item "dist/发票提取.exe" "dist/invoice2excel.exe"
+
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/发票提取.exe
+          files: dist/invoice2excel.exe
