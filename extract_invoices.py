@@ -6,6 +6,7 @@
 import sys
 import re
 import os
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 
@@ -16,14 +17,32 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─────────────────────────── 字段提取 ───────────────────────────
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """提取 PDF 全文"""
+def extract_page_texts(pdf_path: str) -> list:
+    """按页提取 PDF 文本（一个 PDF 文件可能含多张发票，需按页分组）"""
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+            return [page.extract_text() or "" for page in pdf.pages]
     except Exception as e:
         print(f"  ⚠ 读取失败: {pdf_path} — {e}")
-        return ""
+        return []
+
+
+def split_invoice_texts(page_texts: list) -> list:
+    """按每页的发票号码把多页 PDF 拆成独立发票的文本段。
+    页上出现与前页不同的 20 位号码即视为新发票；无号码的页并入前一张（续页）。"""
+    groups = []  # [发票号码 or None, [页文本...]]
+    for pt in page_texts:
+        m = re.search(r"发票号码[：:]\s*(\d{20})", pt)
+        num = m.group(1) if m else None
+        if not groups:
+            groups.append([num, [pt]])
+        elif num and groups[-1][0] and num != groups[-1][0]:
+            groups.append([num, [pt]])
+        else:
+            if num and not groups[-1][0]:
+                groups[-1][0] = num
+            groups[-1][1].append(pt)
+    return ["\n".join(g[1]) for g in groups]
 
 
 def _find(pattern, text, default="", flags=0):
@@ -34,9 +53,122 @@ def _find(pattern, text, default="", flags=0):
         return default
 
 
+def _is_num(tok: str) -> bool:
+    return bool(re.fullmatch(r"-?[\d,]+(?:\.\d+)?", tok))
+
+
+def _to_num(tok: str):
+    try:
+        return float(tok.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _split_merged_qty_price(tok: str, amount):
+    """数量与单价在 PDF 提取时可能粘连成一个数（如 280 和 87.94 变成 28087.94…），
+    按「数量 × 单价 ≈ 金额」逐位试拆还原"""
+    if amount is None or "." not in tok:
+        return None
+    int_part = tok.split(".")[0].lstrip("-")
+    for i in range(1, len(int_part)):
+        qty_s, price_s = tok[:i], tok[i:]
+        if price_s.startswith("0") and not price_s.startswith("0."):
+            continue
+        qty, price = float(qty_s), float(price_s)
+        if abs(round(qty * price, 2) - amount) <= 0.01:
+            return qty, price
+    return None
+
+
+# 商品行下方的折行碎片不会包含这些内容；遇到即停止拼接
+_ITEM_STOP = re.compile(r"[¥￥%]|合\s*计|价税|备\s*注|开票人|收款人|复\s*核|销\s*售|购\s*买|监\s*制|发票|开票日期|税额")
+
+
+def parse_line_items(text: str) -> list:
+    """解析商品明细行。行格式：*税收分类*名称 [规格] [单位] [数量 单价] 金额 税率 税额
+    行尾三项结构固定，从右往左解析；数量/单价/单位按剩余 token 尽力还原。
+    名称/规格过长时 PDF 会折行，紧随其后的碎片行按 全中文→名称、含字母数字→规格 拼回。"""
+    lines = text.split("\n")
+    items = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^\s*\*([^*\n]+)\*\s*(.+)$", lines[i])
+        i += 1
+        if not m:
+            continue
+        category, rest = m.group(1).strip(), m.group(2).strip()
+        tokens = rest.split()
+        if len(tokens) < 3:
+            continue
+        rate = tokens[-2]
+        if not (rate.endswith("%") or rate in ("免税", "不征税", "***")):
+            continue
+        if not (_is_num(tokens[-1]) and _is_num(tokens[-3])):
+            continue
+        tax_amount = _to_num(tokens[-1])
+        amount = _to_num(tokens[-3])
+
+        mid = tokens[:-3]
+        name = mid.pop(0) if mid else ""
+        qty = price = None
+        unit = ""
+        if mid and _is_num(mid[-1]):
+            price_tok = mid.pop()
+            if mid and _is_num(mid[-1]):
+                qty = _to_num(mid.pop())
+                price = _to_num(price_tok)
+            else:
+                merged = _split_merged_qty_price(price_tok.replace(",", ""), amount)
+                if merged:
+                    qty, price = merged
+                else:
+                    price = _to_num(price_tok)
+        if mid and not _is_num(mid[-1]) and re.fullmatch(r"[一-鿿]{1,3}", mid[-1]):
+            unit = mid.pop()
+        spec = " ".join(mid)
+
+        # 折行恢复：最多向下拼 3 行碎片。
+        # 名称列窄，折行出的名称碎片必然短，只认第一个 ≤6 字的纯中文碎片；其余归规格
+        taken = 0
+        name_extended = False
+        while i < len(lines) and taken < 3:
+            cont = lines[i].strip()
+            if not cont or cont.startswith("*") or _ITEM_STOP.search(cont):
+                break
+            ctoks = cont.split()
+            if len(ctoks) > 3 or any(_is_num(t) for t in ctoks):
+                break
+            for t in ctoks:
+                if not name_extended and re.fullmatch(r"[一-鿿]{1,6}", t):
+                    name += t
+                    name_extended = True
+                else:
+                    spec = f"{spec} {t}".strip()
+            i += 1
+            taken += 1
+
+        items.append({
+            "税收分类": category,
+            "商品名称": name,
+            "规格型号": spec,
+            "单位": unit,
+            "数量": qty,
+            "单价": price,
+            "金额": amount,
+            "税率": rate,
+            "税额": tax_amount,
+        })
+    return items
+
+
 def parse_invoice(text: str, filename: str) -> dict:
     """从发票文本中解析关键字段（兼容增值税电子发票 & 全电发票）"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # 部分 PDF 内嵌字体将"子"等字映射到康熙部首区（如"电⼦发票"），归一化为常规汉字
+    text = "".join(
+        unicodedata.normalize("NFKC", ch) if "⺀" <= ch <= "⿟" else ch
+        for ch in text
+    )
 
     # ── 发票类型 ──────────────────────────────────────────────────
     type_map = {
@@ -45,7 +177,7 @@ def parse_invoice(text: str, filename: str) -> dict:
         "增值税专用发票": "增值税专用发票",
         "增值税电子普通发票": "增值税电子普通发票",
         "增值税普通发票": "增值税普通发票",
-        "电子发票": "电子发票",
+        "电子发票": "电子发票（普通发票）",
     }
     invoice_type = "未知"
     for kw, label in type_map.items():
@@ -54,13 +186,10 @@ def parse_invoice(text: str, filename: str) -> dict:
             break
 
     # ── 发票代码 / 号码 ───────────────────────────────────────────
-    # 旧版：发票代码（10/12位）+ 发票号码（8位）
+    # 旧版：发票代码（10/12位）+ 发票号码（8位）；数电票：仅20位发票号码、无发票代码
     code = _find(r"发票代码[：:]\s*(\d{10,12})", text)
-    number = _find(r"发票号码[：:]\s*(\d{6,8})", text)
-
-    # 全电发票：只有发票号码（20位）
-    if not number:
-        number = _find(r"发票号码[：:]\s*(\d{10,20})", text)
+    # 上限放到20位贪婪匹配，避免20位号码被旧版8位规则截断
+    number = _find(r"发票号码[：:]\s*(\d{6,20})", text)
     if not code and not number:
         # 尝试无标签的 20 位号码
         m = re.search(r"\b(\d{20})\b", text)
@@ -117,6 +246,12 @@ def parse_invoice(text: str, filename: str) -> dict:
                 if not seller_tax_id:
                     seller_tax_id = id_pairs[0][1]
 
+    # PDF 字符间距会让提取的公司名混入空格（如"广 东 能 环…"），统一去除
+    if buyer:
+        buyer = re.sub(r"\s+", "", buyer)
+    if seller:
+        seller = re.sub(r"\s+", "", seller)
+
     # ── 金额 ──────────────────────────────────────────────────────
     # 合计金额（不含税）
     subtotal = _find(r"合\s*计\s*[¥￥]?\s*([\d,]+\.?\d*)\s*[¥￥]?\s*[\d,]+\.?\d*", text)
@@ -138,12 +273,19 @@ def parse_invoice(text: str, filename: str) -> dict:
     # ── 备注 ──────────────────────────────────────────────────────
     remark = _find(r"备\s*注[：:]\s*(.+?)(?:\n|$)", text)
 
-    # ── 商品/服务名称（取第一项）────────────────────────────────────
-    item = _find(r"\*[^*\n]+\*([^\n]+)", text)  # 常见格式：*类别*商品名
-    if not item:
-        item = _find(r"货物或应税劳务.*?\n(.+?)(?:\s+\d|\s+\*)", text)
+    # ── 商品/服务明细 ─────────────────────────────────────────────
+    line_items = parse_line_items(text)
+    if line_items:
+        item = line_items[0]["商品名称"]
+        if len(line_items) > 1:
+            item = f"{item}（等{len(line_items)}项）"
+    else:
+        item = _find(r"\*[^*\n]+\*([^\n]+)", text)  # 常见格式：*类别*商品名
+        if not item:
+            item = _find(r"货物或应税劳务.*?\n(.+?)(?:\s+\d|\s+\*)", text)
 
     return {
+        "_明细":          line_items,
         "文件名":        filename,
         "发票类型":       invoice_type,
         "发票代码":       code,
@@ -245,6 +387,48 @@ def write_excel(records: list, output_path: str, pdf_folder: Path = None):
     # ── 冻结首行 ──────────────────────────────────────────────────
     ws.freeze_panes = "A2"
 
+    # ── 商品明细 Sheet（每条商品一行）──────────────────────────────
+    DETAIL_HEADERS = ["文件名", "发票号码", "税收分类", "商品名称", "规格型号",
+                      "单位", "数量", "单价", "金额", "税率", "税额"]
+    DETAIL_WIDTHS = {"文件名": 30, "发票号码": 22, "税收分类": 16, "商品名称": 20,
+                     "规格型号": 26, "单位": 8, "数量": 10, "单价": 12,
+                     "金额": 12, "税率": 8, "税额": 12}
+    DETAIL_NUM_FMT = {"数量": "General", "单价": "#,##0.00##", "金额": "#,##0.00", "税额": "#,##0.00"}
+
+    wsd = wb.create_sheet("商品明细")
+    wsd.row_dimensions[1].height = 28
+    for col_idx, col_name in enumerate(DETAIL_HEADERS, start=1):
+        cell = wsd.cell(row=1, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = border
+        wsd.column_dimensions[cell.column_letter].width = DETAIL_WIDTHS.get(col_name, 14)
+
+    detail_row = 2
+    for record in records:
+        for li in record.get("_明细", []):
+            is_alt = detail_row % 2 == 0
+            row_fill = PatternFill("solid", fgColor=ALT_ROW_BG) if is_alt else None
+            values = {"文件名": record.get("文件名", ""), "发票号码": record.get("发票号码", ""), **li}
+            for col_idx, col_name in enumerate(DETAIL_HEADERS, start=1):
+                value = values.get(col_name)
+                cell = wsd.cell(row=detail_row, column=col_idx, value=value)
+                if cell.data_type == "f":
+                    cell.data_type = "s"  # 防公式注入，同汇总表
+                cell.font = data_font
+                cell.border = border
+                cell.alignment = Alignment(
+                    horizontal="left" if col_name in ("文件名", "商品名称", "规格型号") else "center",
+                    vertical="center", wrap_text=True,
+                )
+                if col_name in DETAIL_NUM_FMT and isinstance(value, float):
+                    cell.number_format = DETAIL_NUM_FMT[col_name]
+                if row_fill:
+                    cell.fill = row_fill
+            detail_row += 1
+    wsd.freeze_panes = "A2"
+
     # ── 汇总 Sheet ────────────────────────────────────────────────
     ws2 = wb.create_sheet("统计")
     ws2["A1"] = "统计项"
@@ -305,13 +489,17 @@ def main():
 
     for pdf_path in pdf_files:
         print(f"  → 处理: {pdf_path.name}")
-        text = extract_text_from_pdf(str(pdf_path))
-        if not text.strip():
+        page_texts = extract_page_texts(str(pdf_path))
+        if not "".join(page_texts).strip():
             print(f"    ⚠ 文本为空，可能是扫描件或加密 PDF")
             failed.append(pdf_path.name)
             continue
-        record = parse_invoice(text, pdf_path.name)
-        records.append(record)
+        # 一个 PDF 文件可能含多张发票（按页上的发票号码拆分），每张一条记录
+        segments = split_invoice_texts(page_texts)
+        if len(segments) > 1:
+            print(f"    ℹ 该文件含 {len(segments)} 张发票")
+        for seg in segments:
+            records.append(parse_invoice(seg, pdf_path.name))
 
     if not records:
         print("\n❌ 没有成功解析任何发票")
