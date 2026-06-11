@@ -221,6 +221,9 @@ def write_excel(records: list, output_path: str, pdf_folder: Path = None):
                 except ValueError:
                     pass
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            if cell.data_type == "f":
+                # PDF 提取的文本若以 = 开头，openpyxl 会当作公式写入，强制按文本处理防止公式注入
+                cell.data_type = "s"
             cell.border = border
             cell.alignment = Alignment(
                 horizontal="center" if col_name in ("发票代码","发票号码","开票日期","合计金额(不含税)","合计税额","价税合计") else "left",
@@ -252,8 +255,8 @@ def write_excel(records: list, output_path: str, pdf_folder: Path = None):
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     stats = [
-        ("发票总张数", f"=COUNTA('发票汇总'!A2:A10000)"),
-        ("价税合计总金额", f"=SUMPRODUCT(IFERROR(VALUE(SUBSTITUTE('发票汇总'!L2:L10000,\",\",\"\")),0))"),
+        ("发票总张数", "=COUNTA('发票汇总'!A2:A10000)"),
+        ("价税合计总金额", "=SUMPRODUCT(IFERROR(VALUE(SUBSTITUTE('发票汇总'!L2:L10000,\",\",\"\")),0))"),
     ]
     for r, (label, formula) in enumerate(stats, start=2):
         ws2.cell(row=r, column=1, value=label).font = Font(name="微软雅黑", size=10)
@@ -265,6 +268,12 @@ def write_excel(records: list, output_path: str, pdf_folder: Path = None):
 
 
 # ─────────────────────────── 主流程 ───────────────────────────────
+
+def pause_if_frozen():
+    """EXE 双击运行时控制台会立即关闭，结束前暂停以便用户查看结果"""
+    if getattr(sys, "frozen", False):
+        input("\n按回车键退出...")
+
 
 def get_base_dir() -> Path:
     """返回脚本/EXE 所在目录，兼容 PyInstaller 打包和直接运行两种模式。"""
@@ -278,11 +287,14 @@ def main():
 
     if not folder.exists():
         print(f"❌ 文件夹不存在: {folder.resolve()}")
+        pause_if_frozen()
         sys.exit(1)
 
-    pdf_files = sorted(folder.glob("*.pdf"))  # 只扫当前层，不递归子文件夹
+    # 只扫当前层，不递归子文件夹；按后缀小写匹配，兼容 .PDF 等大写扩展名
+    pdf_files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
     if not pdf_files:
         print(f"⚠ 在 {folder.resolve()} 中未找到 PDF 文件")
+        pause_if_frozen()
         sys.exit(1)
 
     print(f"📂 扫描文件夹: {folder.resolve()}")
@@ -303,6 +315,7 @@ def main():
 
     if not records:
         print("\n❌ 没有成功解析任何发票")
+        pause_if_frozen()
         sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -313,7 +326,20 @@ def main():
     if failed:
         print(f"⚠ 失败 {len(failed)} 个: {', '.join(failed)}")
     print(f"📊 输出文件: {output_path.resolve()}")
+    pause_if_frozen()
 
 
 if __name__ == "__main__":
-    main()
+    # 控制台编码不支持 emoji 时（如重定向到 GBK 文件）降级为替换字符，避免直接崩溃
+    for stream in (sys.stdout, sys.stderr):
+        if stream and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        pause_if_frozen()
+        sys.exit(1)
