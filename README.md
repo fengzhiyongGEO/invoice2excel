@@ -55,14 +55,24 @@
 
 > 首次运行如果 Windows 弹出"已保护你的电脑"，点击"更多信息"→"仍要运行"即可（程序未购买代码签名证书，源码就在本仓库，可自行审阅）。
 
-### 方式二：Python 直接运行（macOS / Linux / 开发者）
+### 方式二：Python 脚本（macOS / Linux / 开发者，需先安装 Python）
+
+macOS 没有免环境的一键版本，需要先装好 Python 环境（仅首次）：
 
 ```bash
-pip install -r requirements.txt
+python3 --version   # 若弹窗提示安装"命令行开发者工具"，点安装即可
+pip3 install -r requirements.txt
+```
+
+然后运行：
+
+```bash
 python3 extract_invoices.py [发票文件夹路径]
 ```
 
 不传参数时，默认扫描脚本所在文件夹。
+
+**macOS 想要双击运行的体验**：把 `双击提取.command` 和 `extract_invoices.py` 一起放进发票文件夹，双击 `.command` 即可。若是从网页单独下载（非 git clone），先在终端执行一次 `chmod +x 双击提取.command` 恢复执行权限；首次双击被系统拦截时，右键 → 打开。
 
 ## 注意事项
 
